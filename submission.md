@@ -4,7 +4,21 @@
 
 ## AI Usage
 
-<!-- AI_USAGE -->
+I used **Claude Code** (Claude Opus 5.5, running in VS Code) as a pair programmer for the whole project. It read files, ran commands against the local app, and drafted code and documentation, which I reviewed. Specifically:
+
+- **Orientation.** Claude read `README.md`, `models.py`, every route and service file, `seed_data.py`, and the tests, then summarised each module's responsibility and traced the rate-a-song, add-to-playlist, and view-playlist call chains. That became the codebase map below. Before any code changed, it ran the existing test suite to get a baseline (4 failing tests, which lined up with Issues #1, #3, and #5).
+- **Reproduction before fixing.** For #3, #4, and #5 it used `curl` against the running Flask app with seeded data. For the time-dependent bugs (#1 Sunday, #2 "yesterday"), it wrote a throwaway script with an in-memory DB that calls the service functions with controlled datetimes. No code changed until all five bugs were reproduced.
+- **Confirming hypotheses with evidence instead of guessing.**
+  - #1: printing `weekday()` next to the streak showed the resets landed exactly on `weekday() == 6`.
+  - #3: counting the raw joined rows per title showed rows = tag count. Claude's explanation, that the legacy `Query` API de-duplicates while `select().scalars()` doesn't (which is why PR #45 made the bug surface), was a claim I didn't want to take on trust. We ran the same join through `db.session.query(Song)` and got 1 row against 3, which confirmed it.
+  - #4: comparing `add_to_playlist()` and `rate_song()` line by line, and searching for every `create_notification` call, showed only one call site.
+- **Writing fixes and tests.** Claude drafted each fix and the regression tests. For every new test we checked that it **fails on the original code** (by stashing the fix) and passes with the fix.
+
+**Where the AI was wrong or incomplete, and what needed checking:**
+- After the search fix, the first `curl` check still showed duplicates. That wasn't a bad fix: the Flask server (started without `--debug`) was still running the old code. Restarting it showed correct results. This is a reminder to confirm what's actually running before trusting a "still broken" or "now fixed" result.
+- While reproducing #5, the add-song endpoint returned 500 for every request. Neither the issue reports nor the README mention this, and the playlist-add notification that #4 describes as "working" exists only because `seed_data.py` inserts it directly. We fixed it as a separate, clearly labelled commit instead of folding it into #4 or #5.
+- For #2 there is a real design choice the code can't settle: what "today" means. We chose the UTC calendar day to match the streak logic, and the RCA notes that a per-user local day would need a timezone field.
+- The narrative and the design choices in each RCA (UTC "today", notifying on re-ratings, removing the join instead of adding `DISTINCT`) are written down so a reviewer can disagree with them explicitly.
 
 ---
 
