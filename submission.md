@@ -2,6 +2,14 @@
 
 **Branch:** `bugfix/mixtape`
 
+## Commit History
+
+`git log --oneline` on `bugfix/mixtape`: one `fix:` commit per bug (Issues #1–#5, plus the add-to-playlist fix), with `docs:` commits for this write-up.
+
+![git log --oneline screenshot 1](screenshots/git-log-1.png)
+
+![git log --oneline screenshot 2](screenshots/git-log-2.png)
+
 ## AI Usage
 
 I used **Claude Code** (Claude Opus 5.5, running in VS Code) as a pair programmer for the whole project. It read files, ran commands against the local app, and drafted code and documentation, which I reviewed. Specifically:
@@ -177,15 +185,18 @@ This isn't one of the five tracker issues. I fixed it because it blocked the rep
 
 ## Regression Tests
 
-Every fix has a test that fails on the original code and passes after the fix:
+Every fix has a test that fails on the original code and passes after the fix. I confirmed this for each new test by temporarily reverting the fix (`git stash`) and re-running it.
 
-| Issue | Test(s) |
-|---|---|
-| #1 | `tests/test_streaks.py::test_streak_increments_on_sunday` (existing), `test_streak_continues_through_full_week`, `test_streak_resets_when_saturday_skipped` (new) |
-| #2 | `tests/test_feed.py::test_listening_now_excludes_yesterday`, `test_activity_feed_still_includes_yesterday` (new file) |
-| #3 | `tests/test_search.py::test_search_no_duplicates_multi_tag_song` (existing) |
-| #4 | `tests/test_notifications.py::test_rating_notifies_song_sharer` plus 3 edge-case tests (new file) |
-| #5 | `tests/test_playlists.py::test_playlist_returns_all_songs` (existing), `test_newly_added_song_is_returned`, `test_single_song_playlist_returns_that_song` (new) |
-| Add-song 500 | `tests/test_playlists.py::test_add_to_playlist_appends_at_next_position`, `test_add_to_empty_playlist_starts_at_position_1` (new) |
+| Issue | Test | What it verifies | Why it fails on the buggy code |
+|---|---|---|---|
+| #1 | `tests/test_streaks.py::test_streak_continues_through_full_week` (new), `test_streak_increments_on_sunday` (existing) | Listening 14 days in a row gives a streak equal to the day count, every day | On Sunday the `today.weekday() != 6` condition sends a consecutive-day listen to the reset branch, so the streak is 1 when the test expects 7 |
+| #1 | `test_streak_resets_when_saturday_skipped` (new) | Friday then Sunday (Saturday skipped) still resets to 1 | Passes both before and after. It guards the other side of the boundary, so the fix can't over-correct |
+| #2 | `tests/test_feed.py::test_listening_now_excludes_yesterday` (new) | A friend at 23:59 yesterday is excluded and a friend at 00:00 today is included | With the rolling `now - 24h` cutoff, the 23:59-yesterday listen is still inside the window, so both friends come back instead of only simone |
+| #2 | `test_activity_feed_still_includes_yesterday` (new) | The un-filtered activity feed still shows yesterday's listen | Side-effect guard: the fix must not touch `get_activity_feed()` |
+| #3 | `tests/test_search.py::test_search_no_duplicates_multi_tag_song` (existing) | A song with 3 tags appears exactly once in results | The unused `outerjoin(song_tags)` gives one row per tag, so the song comes back 3 times |
+| #4 | `tests/test_notifications.py::test_rating_notifies_song_sharer` (new) | When kenji rates aaliya's song, aaliya gets one `song_rated` notification naming kenji and the song | `rate_song()` never called `create_notification()`, so aaliya has 0 notifications |
+| #4 | `test_rating_own_song_does_not_notify`, `test_rating_still_saved_and_updated`, `test_invalid_score_creates_no_notification` (new) | No self-notification, re-rating still updates one row, rejected scores don't notify | Side-effect guards for the new notification code |
+| #5 | `tests/test_playlists.py::test_newly_added_song_is_returned`, `test_single_song_playlist_returns_that_song` (new), `test_playlist_returns_all_songs` (existing) | Every song comes back, including the newest, and a one-song playlist returns that song | `songs[:-1]` drops the last element: Track 6 is missing, and the one-song playlist comes back empty |
+| Add-song 500 | `test_add_to_playlist_appends_at_next_position`, `test_add_to_empty_playlist_starts_at_position_1` (new) | `add_to_playlist()` stores the song at the next position, and a duplicate add is a no-op | `playlist.songs.append()` leaves the NOT NULL `position` column empty, so the commit raises `IntegrityError` |
 
 Run with `pytest tests/`. Result on this branch: **25 passed**. On `main`, 4 existing tests failed.
