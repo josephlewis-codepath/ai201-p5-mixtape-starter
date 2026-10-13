@@ -89,4 +89,21 @@
 - `get_activity_feed()` shares the module and is intentionally not time-filtered. `test_activity_feed_still_includes_yesterday` confirms yesterday's listen still appears there.
 - Known trade-off: "today" is the UTC day, not the user's local day, because the app has no per-user timezone. Showing local days would need a timezone field on `User`, which is out of scope.
 
+### **Issue #3 — The same song keeps showing up twice in search**
+
+**How I reproduced it.** After `python seed_data.py` and with the app running, `GET /songs/search?q=Anthem` returned `count: 3`, with "Crown Heights Anthem" listed three identical times. `?q=Midnight` returned "Midnight Drive" once. A broad `?q=a` returned 23 results for 13 songs. The data condition behind it: the songs that repeated were exactly the ones seeded with 3 tags, while songs with 0 or 1 tag appeared once. The existing `test_search_no_duplicates_multi_tag_song` also failed.
+
+**How I found the root cause.** `routes/songs.py` → `search()` → `search_songs()` in `services/search_service.py`. The query is `select(Song).outerjoin(song_tags, Song.id == song_tags.c.song_id).filter(title ILIKE … OR artist ILIKE …)`. Because the duplicate count matched the tag count, I suspected the join. To confirm, I ran the same join selecting `(Song.title, song_tags.c.tag_id)` and counted rows per title. Every 3-tag song produced 3 rows and every 0- or 1-tag song produced 1 row, the same pattern as the search results. I also read `git log`. The last merged commit (PR #45, "use SQLAlchemy 2.0 select() so Bug #3 duplicates actually surface") switched this query from the legacy `Query` API to `select()`. That explains why this was a conditional bug: the legacy `Query` would de-duplicate single-entity results, which hid the extra join rows, while `session.execute(select(...)).scalars().all()` returns every row.
+
+**The root cause.** `search_songs()` outer-joins `Song` to the `song_tags` association table, but nothing in the query filters or selects on tags. A SQL join yields one row per matching (song, tag) pair, so a song with N tags comes back N times (or once if it has no tags, thanks to the outer join). `.scalars().all()` maps each row to its `Song` object without de-duplicating, so the same `Song` appeared N times in the list. The join was also unnecessary for the output, because `Song.to_dict()` already loads tags through the `Song.tags` relationship (`lazy="subquery"`).
+
+**My fix.** I removed the `.outerjoin(song_tags, …)` line from `search_songs()` and the now-unused `Tag, song_tags` imports. With no join, the query returns one row per `Song` that matches the title/artist filter. I chose removing the join over adding `.distinct()` because the join had no purpose: `.distinct()` would hide the duplicates while still making the database build and then collapse N rows per song.
+
+**Side-effect check.**
+- All 5 tests in `tests/test_search.py` pass, including the 0-, 1-, and 3-tag no-duplicate cases and the no-match case.
+- Restarted the app. `?q=Anthem` → 1 result. `?q=a` → 13 results, one per seeded song. `?q=zzz` → empty list.
+- Tags are not lost: each result's `tags` list still has 0, 1, or 3 entries as seeded, because tags come from the relationship and never came from the join.
+- Searching by artist (`?q=Borough`) still finds Crown Heights Anthem, so the `OR` filter is unchanged.
+- `get_song()` in the same file doesn't use the join and is unaffected.
+
 <!-- RCA -->
