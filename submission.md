@@ -138,4 +138,40 @@
 - Re-ran my script: 7 entries → T1–T7, add 8th → T1–T8.
 - `get_playlist()` (metadata) and `get_user_playlists()` don't use this function and were unaffected.
 
-<!-- RCA -->
+---
+
+## Additional Fix (found while reproducing #4 and #5)
+
+### **Adding a song to a playlist always returns 500**
+
+This isn't one of the five tracker issues. I fixed it because it blocked the reproduction steps of two of them ("Added one more song (POST /playlists/<id>/songs)" in #5, and the working playlist-add notification that #4 compares against).
+
+**How I reproduced it.** On the freshly seeded app, `POST /playlists/<Friday Energy>/songs` with a valid `song_id` and `added_by` returned **500 Internal Server Error** for every song and user I tried. The Flask log showed `sqlite3.IntegrityError: NOT NULL constraint failed: playlist_entries.position`. The playlist-add notification visible after seeding was inserted directly by `seed_data.py`, not created through this endpoint.
+
+**How I found the root cause.** The traceback pointed into `add_to_playlist()` in `services/notification_service.py`, at `playlist.songs.append(song)` followed by `db.session.commit()`. In `models.py`, `Playlist.songs` is a plain `relationship(secondary=playlist_entries)`, and `playlist_entries` declares `position` and `added_by` as `nullable=False`. `seed_data.py` and every test build playlists by inserting into `playlist_entries` with explicit `position` and `added_by` values, which is why nothing else exercised this path.
+
+**The root cause.** When you append to a `secondary` relationship, SQLAlchemy writes only the two foreign keys (`playlist_id`, `song_id`) to the association table. It knows nothing about extra columns. `playlist_entries` requires `position` and `added_by`, so every insert violated a NOT NULL constraint, the commit raised `IntegrityError` (not the `ValueError` the route catches), and the request failed with 500 before the notification code was reached.
+
+**My fix.** I replaced `playlist.songs.append(song)` with an explicit `playlist_entries.insert()` that sets `position` to the playlist's current `MAX(position) + 1` (so 1 for an empty playlist) and `added_by` to the adding user. The `if song not in playlist.songs` guard is unchanged, so re-adding a song is still a no-op instead of hitting the composite primary key.
+
+**Side-effect check.**
+- Via HTTP: darius added "Frequencies" → 201, count 7 → 8 with Frequencies last, and simone (its sharer) got a notification. Then simone added "Midnight Drive" → 201, count 9 with it last, and nova (its sharer) got "simone added your song 'Midnight Drive' to the playlist 'Friday Energy'."
+- New tests `test_add_to_playlist_appends_at_next_position` (also checks that a duplicate add is a no-op) and `test_add_to_empty_playlist_starts_at_position_1` in `tests/test_playlists.py`.
+- Full suite: 25 passed.
+
+---
+
+## Regression Tests
+
+Every fix has a test that fails on the original code and passes after the fix:
+
+| Issue | Test(s) |
+|---|---|
+| #1 | `tests/test_streaks.py::test_streak_increments_on_sunday` (existing), `test_streak_continues_through_full_week`, `test_streak_resets_when_saturday_skipped` (new) |
+| #2 | `tests/test_feed.py::test_listening_now_excludes_yesterday`, `test_activity_feed_still_includes_yesterday` (new file) |
+| #3 | `tests/test_search.py::test_search_no_duplicates_multi_tag_song` (existing) |
+| #4 | `tests/test_notifications.py::test_rating_notifies_song_sharer` plus 3 edge-case tests (new file) |
+| #5 | `tests/test_playlists.py::test_playlist_returns_all_songs` (existing), `test_newly_added_song_is_returned`, `test_single_song_playlist_returns_that_song` (new) |
+| Add-song 500 | `tests/test_playlists.py::test_add_to_playlist_appends_at_next_position`, `test_add_to_empty_playlist_starts_at_position_1` (new) |
+
+Run with `pytest tests/`. Result on this branch: **25 passed**. On `main`, 4 existing tests failed.

@@ -123,3 +123,44 @@ def test_single_song_playlist_returns_that_song(app):
         db.session.commit()
 
         assert [s["title"] for s in get_playlist_songs(playlist.id)] == ["Only Track"]
+
+
+def test_add_to_playlist_appends_at_next_position(app, seed_playlist):
+    """Adding a song through add_to_playlist stores it after the existing songs."""
+    from services.notification_service import add_to_playlist
+
+    with app.app_context():
+        user = seed_playlist["user"]
+        playlist_id = seed_playlist["playlist"].id
+        friend = User(username="friend", email="friend@example.com")
+        new_song = Song(title="Track 6", artist="Various", shared_by=user.id)
+        db.session.add_all([friend, new_song])
+        db.session.commit()
+
+        add_to_playlist(playlist_id, new_song.id, friend.id)
+        add_to_playlist(playlist_id, new_song.id, friend.id)  # already present: no-op
+
+        titles = [s["title"] for s in get_playlist_songs(playlist_id)]
+        assert titles == [f"Track {i}" for i in range(1, 7)]
+
+
+def test_add_to_empty_playlist_starts_at_position_1(app):
+    """The first song added to an empty playlist gets position 1."""
+    from services.notification_service import add_to_playlist
+
+    with app.app_context():
+        user = User(username="starter", email="starter@example.com")
+        db.session.add(user)
+        db.session.flush()
+        song = Song(title="Opener", artist="Various", shared_by=user.id)
+        playlist = Playlist(name="Fresh", created_by=user.id)
+        db.session.add_all([song, playlist])
+        db.session.commit()
+
+        add_to_playlist(playlist.id, song.id, user.id)
+
+        position = db.session.execute(
+            db.select(playlist_entries.c.position).where(playlist_entries.c.playlist_id == playlist.id)
+        ).scalar()
+        assert position == 1
+        assert [s["title"] for s in get_playlist_songs(playlist.id)] == ["Opener"]
