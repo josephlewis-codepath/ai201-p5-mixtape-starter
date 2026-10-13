@@ -94,3 +94,25 @@ def test_streak_increments_on_sunday(app, user):
 
         update_listening_streak(u, sunday)
         assert u.listening_streak == 2  # Should increment, not reset
+
+
+def test_streak_continues_through_full_week(app, user):
+    """A daily listener's streak keeps growing across Sunday into Monday."""
+    with app.app_context():
+        u = db.session.get(User, user.id)
+        start = datetime(2024, 6, 10, 12, 0, 0, tzinfo=timezone.utc)  # Monday
+        for i in range(14):
+            update_listening_streak(u, start + timedelta(days=i))
+            assert u.listening_streak == i + 1
+
+
+def test_streak_resets_when_saturday_skipped(app, user):
+    """Skipping Saturday still resets the streak on Sunday."""
+    with app.app_context():
+        u = db.session.get(User, user.id)
+        friday = datetime(2024, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+        sunday = datetime(2024, 6, 16, 12, 0, 0, tzinfo=timezone.utc)
+
+        update_listening_streak(u, friday)
+        update_listening_streak(u, sunday)
+        assert u.listening_streak == 1

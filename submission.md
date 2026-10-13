@@ -56,4 +56,21 @@
 
 ## Root Cause Analyses
 
+### **Issue #1 — My listening streak keeps resetting**
+
+**How I reproduced it.** The bug depends on the day of the week and the app reads the real clock, so I didn't use HTTP. I used a Python script with an in-memory DB that calls `update_listening_streak(user, now)` with a controlled `now` for every day from Monday 2024-06-03 to Sunday 2024-06-16 at 09:00 UTC. The streak went 1, 2, 3, 4, 5, 6 and then dropped to **1 on Sunday 06-09**. It went 2 on Monday and 7 by Saturday 06-15, then dropped to **1 again on Sunday 06-16**. That matches kenji's report: it resets only on Sundays and counts normally from Monday. The existing `tests/test_streaks.py::test_streak_increments_on_sunday` also failed (`assert 1 == 2`).
+
+**How I found the root cause.** I started at the route: `GET /users/<id>/streak` (`routes/users.py`) calls `get_streak()`, which only reads `User.listening_streak`, so the value had to be wrong when it was written. The only writer is `POST /songs/<id>/listen` → `record_listening_event()` → `update_listening_streak()` in `services/streak_service.py`. Its docstring lists four rules, and none of them mention weekdays. The branch that should implement "listened yesterday → +1" is `elif days_since_last == 1 and today.weekday() != 6:`. I had my script print `today.weekday()` next to the streak, and the reset happened exactly on rows where `weekday() == 6`. That confirmed the cause.
+
+**The root cause.** `update_listening_streak()` increments only when `days_since_last == 1 and today.weekday() != 6`. Python's `date.weekday()` returns 0 for Monday through 6 for Sunday, so the extra condition is false on every Sunday. A Saturday→Sunday listen (`days_since_last == 1`) therefore skips the increment branch and falls into `else: user.listening_streak = 1`, the branch meant for skipped days. On Monday, `days_since_last == 1` and `weekday() == 0`, so counting resumes from the new value of 1. No documented streak rule involves the weekday.
+
+**My fix.** I removed `and today.weekday() != 6` so the branch is `elif days_since_last == 1:`. That matches the documented rule ("If the user listened yesterday: streak increments by 1") for every day of the week. One line in `services/streak_service.py`.
+
+**Side-effect check.**
+- I re-ran my script: the streak now climbs 1→14 across both Sundays.
+- I checked both sides of the boundary. Saturday→Sunday increments (`test_streak_increments_on_sunday` now passes), and Friday→Sunday with Saturday skipped still resets to 1 (new test `test_streak_resets_when_saturday_skipped`).
+- The same-day no-op (`days_since_last == 0`), first-ever listen, and skipped-midweek reset tests all still pass.
+- I added the regression test `test_streak_continues_through_full_week` to `tests/test_streaks.py`. It asserts the streak equals the day count for 14 straight days, so it would have caught the bug.
+- `get_streak()` and the `/listen` route needed no changes.
+
 <!-- RCA -->
