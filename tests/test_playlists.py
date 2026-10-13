@@ -84,3 +84,42 @@ def test_empty_playlist_returns_empty_list(app):
 
         songs = get_playlist_songs(playlist.id)
         assert songs == []
+
+
+def test_newly_added_song_is_returned(app, seed_playlist):
+    """Adding a song at the next position returns it along with all earlier songs."""
+    with app.app_context():
+        user = seed_playlist["user"]
+        playlist_id = seed_playlist["playlist"].id
+        new_song = Song(title="Track 6", artist="Various", shared_by=user.id)
+        db.session.add(new_song)
+        db.session.flush()
+        db.session.execute(
+            playlist_entries.insert().values(
+                playlist_id=playlist_id, song_id=new_song.id, position=6, added_by=user.id,
+            )
+        )
+        db.session.commit()
+
+        titles = [s["title"] for s in get_playlist_songs(playlist_id)]
+        assert titles == [f"Track {i}" for i in range(1, 7)]
+
+
+def test_single_song_playlist_returns_that_song(app):
+    """A playlist with exactly one song returns that one song."""
+    with app.app_context():
+        user = User(username="solo", email="solo@example.com")
+        db.session.add(user)
+        db.session.flush()
+        song = Song(title="Only Track", artist="Various", shared_by=user.id)
+        playlist = Playlist(name="Solo", created_by=user.id)
+        db.session.add_all([song, playlist])
+        db.session.flush()
+        db.session.execute(
+            playlist_entries.insert().values(
+                playlist_id=playlist.id, song_id=song.id, position=1, added_by=user.id,
+            )
+        )
+        db.session.commit()
+
+        assert [s["title"] for s in get_playlist_songs(playlist.id)] == ["Only Track"]

@@ -117,9 +117,25 @@
 **My fix.** I added the missing step to `rate_song()`, mirroring `add_to_playlist()`. After the rating is committed, if the rater is not the song's sharer, it calls `create_notification(user_id=song.shared_by, notification_type="song_rated", body=f"{rater.username} rated your song '{song.title}' {score} out of 5.")`. The type string `song_rated` is the one `create_notification`'s docstring already names. The call comes after the score check and the not-found checks, so rejected ratings never notify.
 
 **Side-effect check.**
-- Via HTTP after the fix: kenji's rating → nova now has 2 notifications, newest first: `song_rated` "kenji rated your song 'Still Waters' 5 out of 5." above the older playlist one. Nova rating her own song → 201, no new notification. Score 0 → 400, no notification.
+- Via HTTP after the fix: kenji's rating → nova now has 2 notifications, newest first: `song_rated` "kenji rated your song 'Still Waters' 5 out of 5." above the older playlist one. Nova rating their own song → 201, no new notification. Score 0 → 400, no notification.
 - New tests in `tests/test_notifications.py`: the sharer is notified (fails on the old code), self-rating doesn't notify, re-rating still updates the single existing `Rating` instead of violating the `unique_user_song_rating` constraint, and an invalid score raises `ValueError` with no notification.
 - `get_notifications()` ordering, `mark_as_read()`, and the playlist-add notification path were not modified.
 - Design note: a re-rating also sends a notification (with the new score). I chose that because the reporter expects "a notification for the rating, same as for the playlist add", and a changed score is new information for the sharer.
+
+### **Issue #5 — The last song in a playlist never shows up**
+
+**How I reproduced it.** After seeding, I checked the DB: "Friday Energy" has 7 rows in `playlist_entries` (positions 1–7). `GET /playlists/<Friday Energy>/songs` returned `count: 6`. Harlem Renaissance, the song at position 7, was missing. For the reporter's second step ("adding a song frees the previous one"), `POST /playlists/<id>/songs` returned **500** (`NOT NULL constraint failed: playlist_entries.position`), a separate defect covered in the Additional Fix section below. So I reproduced that step in a script that inserts entries at positions 1–7 directly and calls `get_playlist_songs()`. It returned T1–T6. After I inserted T8 at position 8, it returned T1–T7: T7 was "freed" and the new T8 was hidden, exactly as darius described. The existing tests `test_playlist_returns_all_songs` (expected 5, got 4) and `test_playlist_returns_songs_in_order` also failed.
+
+**How I found the root cause.** `routes/playlists.py` → `get_songs()` → `get_playlist_songs()` in `services/playlist_service.py`. The route only wraps the list and computes `count` from `len(songs)`, so the song was already missing when the service returned. The query joins `Song` to `playlist_entries`, filters by `playlist_id`, and orders by `position ASC`. I ran that query in a shell and got all 7 songs in the right order, so the SQL was fine. The only thing between the query and the return value is `return [song.to_dict() for song in songs[:-1]]`. The "always exactly one, always the newest" symptom matches what `[:-1]` does to a list sorted by ascending position.
+
+**The root cause.** `get_playlist_songs()` builds a correct list ordered by ascending `position` and then returns `songs[:-1]`. In Python, `[:-1]` means "every element except the last", so the function always dropped the song with the highest position. Because new songs are appended at the end, that is always the most recently added song. Adding another song moves the previous one out of the last slot (so it reappears) and puts the new one in the dropped slot. This contradicts the function's own docstring: "This function returns all songs in the playlist."
+
+**My fix.** I changed the return to `[song.to_dict() for song in songs]`, iterating the full result list. One line.
+
+**Side-effect check.**
+- All 5 tests in `tests/test_playlists.py` pass. That includes the existing ones for count, position order, and empty playlist (`[]` sliced or not is still `[]`), plus two new regression tests: `test_newly_added_song_is_returned` (adding Track 6 returns Tracks 1–6) and `test_single_song_playlist_returns_that_song`. The second one covers the most extreme failure of the old code, where a one-song playlist came back empty.
+- Restarted the app: all three seeded playlists return `count: 7` in position order.
+- Re-ran my script: 7 entries → T1–T7, add 8th → T1–T8.
+- `get_playlist()` (metadata) and `get_user_playlists()` don't use this function and were unaffected.
 
 <!-- RCA -->
