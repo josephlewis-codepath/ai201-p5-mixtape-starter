@@ -73,4 +73,20 @@
 - I added the regression test `test_streak_continues_through_full_week` to `tests/test_streaks.py`. It asserts the streak equals the day count for 14 straight days, so it would have caught the bug.
 - `get_streak()` and the `/listen` route needed no changes.
 
+### **Issue #2 — Friends Listening Now shows people from yesterday**
+
+**How I reproduced it.** The seed data puts every friend's latest listen 10–20 minutes before seeding, so I needed a "listened last night" condition. In a script with an in-memory DB I made nova and darius friends and gave darius one `ListeningEvent` at **yesterday 23:00 UTC**. At the time it was 2026-10-13 21:29 UTC, so the event was 22.5 hours old. Calling `get_friends_listening_now(nova.id)` (the function behind `GET /feed/<id>/listening-now`) returned `[('darius', '2026-10-12T23:00:00')]`. Yesterday's listen was showing as "listening now", as nova reported.
+
+**How I found the root cause.** `routes/feed.py` → `listening_now()` → `get_friends_listening_now()` in `services/feed_service.py`. The function picks friend events with `ListeningEvent.listened_at >= cutoff` and then keeps the newest one per friend. Inclusion depends only on `cutoff`, and the cutoff is `datetime.now(timezone.utc) - RECENT_THRESHOLD`, where `RECENT_THRESHOLD = timedelta(hours=24)`. The reporter's phrase "keeps hanging around … until the same time the next day" describes a rolling 24-hour window exactly. That is what convinced me the cutoff was the cause, not the de-duplication loop.
+
+**The root cause.** The feature is meant to show friends who have listened **today**, but the cutoff was a rolling window: "now minus 24 hours". A 24-hour window measured from 9 am today reaches back to 9 am yesterday, so a listen at 11 pm last night counts as recent until 11 pm tonight. The code measured elapsed time, but the requirement is a calendar-day boundary.
+
+**My fix.** In `services/feed_service.py` I changed the cutoff to the start of the current calendar day: `datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)`. I removed the unused `RECENT_THRESHOLD` and `timedelta` import and updated the docstring to say "today". I used UTC because the whole app stores times in UTC and `update_listening_streak()` already defines a "day" as the UTC date, so the two features now agree on what "today" means.
+
+**Side-effect check.**
+- Both sides of the boundary: new test `tests/test_feed.py::test_listening_now_excludes_yesterday` puts one friend at 23:59 yesterday (excluded) and one at exactly 00:00 today (included). It fails on the old code and passes on the new code.
+- Reseeded and called `GET /feed/<nova>/listening-now` on the running app: darius, simone, and kenji (all listened minutes ago) still appear, newest first, one entry per friend.
+- `get_activity_feed()` shares the module and is intentionally not time-filtered. `test_activity_feed_still_includes_yesterday` confirms yesterday's listen still appears there.
+- Known trade-off: "today" is the UTC day, not the user's local day, because the app has no per-user timezone. Showing local days would need a timezone field on `User`, which is out of scope.
+
 <!-- RCA -->
