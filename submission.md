@@ -106,4 +106,20 @@
 - Searching by artist (`?q=Borough`) still finds Crown Heights Anthem, so the `OR` filter is unchanged.
 - `get_song()` in the same file doesn't use the join and is unaffected.
 
+### **Issue #4 — I got notified when a friend added my song to a playlist but not when they rated it**
+
+**How I reproduced it.** After seeding, with the app running: `GET /users/<nova>/notifications` → `count: 1`, the seeded `song_added_to_playlist` notification. Then kenji rated a song nova shared: `POST /songs/<Still Waters>/rate` with `{"user_id": <kenji>, "score": 5}` → **201**, and the Rating JSON came back with `score: 5`, so the rating was saved. Re-fetching nova's notifications still gave `count: 1`, with no rating notification, as aaliya reported.
+
+**How I found the root cause.** Following the hint, I compared the working flow with the missing one. Both live in `services/notification_service.py`. `POST /playlists/<id>/songs` → `add_to_playlist()`, and `POST /songs/<id>/rate` → `rate_song()`. Side by side, both functions: (1) validate input, (2) load the `Song` and the acting `User`, (3) write their row and commit. `add_to_playlist()` then has a fourth step: `if song.shared_by != added_by_user_id: create_notification(user_id=song.shared_by, notification_type="song_added_to_playlist", ...)`. `rate_song()` stops after `db.session.commit()` and returns. I also searched for every call to `create_notification`. There is exactly one, in `add_to_playlist`, even though the `create_notification` docstring lists `'song_rated'` as an expected type. That told me the code wasn't failing to deliver a rating notification; it never tried to create one.
+
+**The root cause.** This app has no event bus or model hook that creates notifications automatically. The convention (see the codebase map) is that each interaction function calls `create_notification()` inline, after its write. `add_to_playlist()` follows the convention. `rate_song()` doesn't: it saves or updates the `Rating`, commits, and returns without notifying `song.shared_by`. So no `Notification` row is ever written for a rating, no matter who rates what. That explains why the problem affected "anyone I've asked" and why there was no delay, just nothing.
+
+**My fix.** I added the missing step to `rate_song()`, mirroring `add_to_playlist()`. After the rating is committed, if the rater is not the song's sharer, it calls `create_notification(user_id=song.shared_by, notification_type="song_rated", body=f"{rater.username} rated your song '{song.title}' {score} out of 5.")`. The type string `song_rated` is the one `create_notification`'s docstring already names. The call comes after the score check and the not-found checks, so rejected ratings never notify.
+
+**Side-effect check.**
+- Via HTTP after the fix: kenji's rating → nova now has 2 notifications, newest first: `song_rated` "kenji rated your song 'Still Waters' 5 out of 5." above the older playlist one. Nova rating her own song → 201, no new notification. Score 0 → 400, no notification.
+- New tests in `tests/test_notifications.py`: the sharer is notified (fails on the old code), self-rating doesn't notify, re-rating still updates the single existing `Rating` instead of violating the `unique_user_song_rating` constraint, and an invalid score raises `ValueError` with no notification.
+- `get_notifications()` ordering, `mark_as_read()`, and the playlist-add notification path were not modified.
+- Design note: a re-rating also sends a notification (with the new score). I chose that because the reporter expects "a notification for the rating, same as for the playlist add", and a changed score is new information for the sharer.
+
 <!-- RCA -->
