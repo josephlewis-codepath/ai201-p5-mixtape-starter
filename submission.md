@@ -2,14 +2,6 @@
 
 **Branch:** `bugfix/mixtape`
 
-## Commit History
-
-`git log --oneline` on `bugfix/mixtape`: one `fix:` commit per bug (Issues #1–#5, plus the add-to-playlist fix), with `docs:` commits for this write-up.
-
-![git log --oneline screenshot 1](screenshots/git-log-1.png)
-
-![git log --oneline screenshot 2](screenshots/git-log-2.png)
-
 ## AI Usage
 
 I used **Claude Code** (Claude Opus 5.5, running in VS Code) as a pair programmer for the whole project. It read files, ran commands against the local app, and drafted code and documentation, which I reviewed. Specifically:
@@ -200,3 +192,13 @@ Every fix has a test that fails on the original code and passes after the fix. I
 | Add-song 500 | `test_add_to_playlist_appends_at_next_position`, `test_add_to_empty_playlist_starts_at_position_1` (new) | `add_to_playlist()` stores the song at the next position, and a duplicate add is a no-op | `playlist.songs.append()` leaves the NOT NULL `position` column empty, so the commit raises `IntegrityError` |
 
 Run with `pytest tests/`. Result on this branch: **25 passed**. On `main`, 4 existing tests failed.
+
+---
+
+## Commit History
+
+`git log --oneline` on `bugfix/mixtape`: one `fix:` commit per bug (Issues #1–#5, plus the add-to-playlist fix), with `docs:` commits for this write-up.
+
+![git log --oneline screenshot 1](screenshots/git-log-1.png)
+
+![git log --oneline screenshot 2](screenshots/git-log-2.png)
